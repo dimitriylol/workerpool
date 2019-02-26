@@ -136,10 +136,10 @@
 	worker.on('message', function (request) {
 	  try {
 	    var method = worker.methods[request.method];
-
+	    
 	    if (method) {
 	      // execute the function
-	      var result = method.apply(method, request.params);
+	      var result = method.apply(method, (request.params || []).concat(function (msg) { worker.send({ id: request.id, msg: msg }) }))
 
 	      if (isPromise(result)) {
 	        // promise returned, resolve this and then return

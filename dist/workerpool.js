@@ -5,7 +5,7 @@
  * Offload tasks to a pool of workers on node.js and in the browser.
  *
  * @version 3.1.1
- * @date    2019-02-25
+ * @date    2019-02-26
  *
  * @license
  * Copyright (C) 2014-2016 Jos de Jong <wjosdejong@gmail.com>
@@ -25,14 +25,14 @@
 
 (function webpackUniversalModuleDefinition(root, factory) {
 	if(typeof exports === 'object' && typeof module === 'object')
-		module.exports = factory(require("os"), (function webpackLoadOptionalExternalModule() { try { return require("worker_threads"); } catch(e) {} }()), require("child_process"));
+		module.exports = factory(require("os"), require("child_process"));
 	else if(typeof define === 'function' && define.amd)
-		define(["os", "worker_threads", "child_process"], factory);
+		define(["os", "child_process"], factory);
 	else if(typeof exports === 'object')
-		exports["workerpool"] = factory(require("os"), (function webpackLoadOptionalExternalModule() { try { return require("worker_threads"); } catch(e) {} }()), require("child_process"));
+		exports["workerpool"] = factory(require("os"), require("child_process"));
 	else
-		root["workerpool"] = factory(root["os"], root["worker_threads"], root["child_process"]);
-})(this, function(__WEBPACK_EXTERNAL_MODULE_2__, __WEBPACK_EXTERNAL_MODULE_11__, __WEBPACK_EXTERNAL_MODULE_12__) {
+		root["workerpool"] = factory(root["os"], root["child_process"]);
+})(this, function(__WEBPACK_EXTERNAL_MODULE_2__, __WEBPACK_EXTERNAL_MODULE_11__) {
 return /******/ (function(modules) { // webpackBootstrap
 /******/ 	// The module cache
 /******/ 	var installedModules = {};
@@ -194,6 +194,61 @@ return /******/ (function(modules) { // webpackBootstrap
 	  }
 	}
 
+	Pool.prototype._exec = function (method, params, msgCallback) {
+	// validate type of arguments
+	  if (params && !Array.isArray(params)) {
+	    throw new TypeError('Array expected as argument "params"');
+	  }
+
+	  if (typeof method === 'string') {
+	    var resolver = Promise.defer();
+
+	    // add a new task to the queue
+	    var tasks = this.tasks;
+	    var task = {
+	      method:  method,
+	      params:  params,
+	      msgCallback: msgCallback,
+	      resolver: resolver,
+	      timeout: null
+	    };
+	    tasks.push(task);
+
+	    // replace the timeout method of the Promise with our own,
+	    // which starts the timer as soon as the task is actually started
+	    var originalTimeout = resolver.promise.timeout;
+	    resolver.promise.timeout = function timeout (delay) {
+	      if (tasks.indexOf(task) !== -1) {
+	        // task is still queued -> start the timer later on
+	        task.timeout = delay;
+	        return resolver.promise;
+	      }
+	      else {
+	        // task is already being executed -> start timer immediately
+	        return originalTimeout.call(resolver.promise, delay);
+	      }
+	    };
+
+	    // trigger task execution
+	    this._next();
+
+	    return resolver.promise;
+	  }
+	  else if (typeof method === 'function') {
+	    // send stringified function and function arguments to worker
+	    return this._exec('run', [String(method), params], msgCallback);
+	  }
+	  else {
+	    throw new TypeError('Function or string expected as argument "method"');
+	  }
+	}
+
+	Pool.prototype.execWithMsg = function (method, params, msgCallback) {
+	  if (arguments.length !== 3) {
+	    throw new TypeError('Expected 3 arguments: method, params and msgCallback')
+	  }
+	  return this._exec(method, params, msgCallback)
+	}
 
 	/**
 	 * Execute a function on a worker.
@@ -227,51 +282,10 @@ return /******/ (function(modules) { // webpackBootstrap
 	 * @return {Promise.<*, Error>} result
 	 */
 	Pool.prototype.exec = function (method, params) {
-	  // validate type of arguments
-	  if (params && !Array.isArray(params)) {
-	    throw new TypeError('Array expected as argument "params"');
+	  if (arguments.length >= 3) {
+	    throw new TypeError('Expected max 2 arguments: method and params')
 	  }
-
-	  if (typeof method === 'string') {
-	    var resolver = Promise.defer();
-
-	    // add a new task to the queue
-	    var tasks = this.tasks;
-	    var task = {
-	      method:  method,
-	      params:  params,
-	      resolver: resolver,
-	      timeout: null
-	    };
-	    tasks.push(task);
-
-	    // replace the timeout method of the Promise with our own,
-	    // which starts the timer as soon as the task is actually started
-	    var originalTimeout = resolver.promise.timeout;
-	    resolver.promise.timeout = function timeout (delay) {
-	      if (tasks.indexOf(task) !== -1) {
-	        // task is still queued -> start the timer later on
-	        task.timeout = delay;
-	        return resolver.promise;
-	      }
-	      else {
-	        // task is already being executed -> start timer immediately
-	        return originalTimeout.call(resolver.promise, delay);
-	      }
-	    };
-
-	    // trigger task execution
-	    this._next();
-
-	    return resolver.promise;
-	  }
-	  else if (typeof method === 'function') {
-	    // send stringified function and function arguments to worker
-	    return this.exec('run', [String(method), params]);
-	  }
-	  else {
-	    throw new TypeError('Function or string expected as argument "method"');
-	  }
+	  return this._exec(method, params)
 	};
 
 	/**
@@ -289,7 +303,6 @@ return /******/ (function(modules) { // webpackBootstrap
 	  return this.exec('methods')
 	      .then(function (methods) {
 	        var proxy = {};
-
 	        methods.forEach(function (method) {
 	          proxy[method] = function () {
 	            return pool.exec(method, Array.prototype.slice.call(arguments));
@@ -334,7 +347,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	      // check if the task is still pending (and not cancelled -> promise rejected)
 	      if (task.resolver.promise.pending) {
 	        // send the request to the worker
-	        var promise = worker.exec(task.method, task.params, task.resolver)
+	        var promise = worker.exec(task.method, task.params, task.resolver, task.msgCallback)
 	          .then(me._boundNext)
 	          .catch(function () {
 	            // if the worker crashed and terminated, remove it from the pool
@@ -994,10 +1007,10 @@ return /******/ (function(modules) { // webpackBootstrap
 	      if (WorkerThreads) {
 	        this.worker = setupWorkerThreadWorker(this.script, WorkerThreads);
 	      } else {
-	        this.worker = setupProcessWorker(this.script, resolveForkOptions(options), __webpack_require__(12));
+	        this.worker = setupProcessWorker(this.script, resolveForkOptions(options), __webpack_require__(11));
 	      }
 	    } else {
-	      this.worker = setupProcessWorker(this.script, resolveForkOptions(options), __webpack_require__(12));
+	      this.worker = setupProcessWorker(this.script, resolveForkOptions(options), __webpack_require__(11));
 	    }
 	  }
 
@@ -1019,21 +1032,31 @@ return /******/ (function(modules) { // webpackBootstrap
 	      var id = response.id;
 	      var task = me.processing[id];
 	      if (task !== undefined) {
-	        // remove the task from the queue
-	        delete me.processing[id];
-
-	        // test if we need to terminate
-	        if (me.terminating === true) {
-	          // complete worker termination if all tasks are finished
-	          me.terminate();
-	        }
-
-	        // resolve the task's promise
-	        if (response.error) {
-	          task.resolver.reject(objectToError(response.error));
+	        if (response.msg) {
+	          if (task.msgCallback) {
+	            task.msgCallback(response.msg)
+	          }
+	          else {
+	            throw new TypeError("worker send an object with 'msg' field but msgCallback wasn't passed")
+	          }
 	        }
 	        else {
-	          task.resolver.resolve(response.result);
+	          // remove the task from the queue
+	          delete me.processing[id];
+	          
+	          // test if we need to terminate
+	          if (me.terminating === true) {
+	            // complete worker termination if all tasks are finished
+	            me.terminate();
+	          }
+	        
+	          // resolve the task's promise
+	          if (response.error) {
+	            task.resolver.reject(objectToError(response.error));
+	          }
+	          else {
+	            task.resolver.resolve(response.result);
+	          }
 	        }
 	      }
 	    }
@@ -1090,9 +1113,10 @@ return /******/ (function(modules) { // webpackBootstrap
 	 * @param {String} method
 	 * @param {Array} [params]
 	 * @param {{resolve: Function, reject: Function}} [resolver]
+	 * @param {Function} [msgCallback] - listen messages from worker
 	 * @return {Promise.<*, Error>} result
 	 */
-	WorkerHandler.prototype.exec = function(method, params, resolver) {
+	WorkerHandler.prototype.exec = function(method, params, resolver, msgCallback) {
 	  if (!resolver) {
 	    resolver = Promise.defer();
 	  }
@@ -1103,7 +1127,8 @@ return /******/ (function(modules) { // webpackBootstrap
 	  // register a new task as being in progress
 	  this.processing[id] = {
 	    id: id,
-	    resolver: resolver
+	    resolver: resolver,
+	    msgCallback: msgCallback
 	  };
 
 	  // build a JSON-RPC request
@@ -1365,7 +1390,7 @@ return /******/ (function(modules) { // webpackBootstrap
 	 * This file is automatically generated,
 	 * changes made in this file will be overwritten.
 	 */
-	module.exports = "!function(r){function e(n){if(o[n])return o[n].exports;var t=o[n]={exports:{},id:n,loaded:!1};return r[n].call(t.exports,t,t.exports,e),t.loaded=!0,t.exports}var o={};e.m=r,e.c=o,e.p=\"\",e(0)}([function(module,exports,__webpack_require__){function convertError(r){return Object.getOwnPropertyNames(r).reduce(function(e,o){return Object.defineProperty(e,o,{value:r[o],enumerable:!0})},{})}function isPromise(r){return r&&\"function\"==typeof r.then&&\"function\"==typeof r.catch}var worker={};if(\"undefined\"!=typeof self&&\"function\"==typeof postMessage&&\"function\"==typeof addEventListener)worker.on=function(r,e){addEventListener(r,function(r){e(r.data)})},worker.send=function(r){postMessage(r)};else{if(\"undefined\"==typeof process)throw new Error(\"Script must be executed as a worker\");var WorkerThreads;try{WorkerThreads=__webpack_require__(!function(){var r=new Error('Cannot find module \"worker_threads\"');throw r.code=\"MODULE_NOT_FOUND\",r}())}catch(r){if(\"object\"!=typeof r||null===r||\"MODULE_NOT_FOUND\"!=r.code)throw r}if(WorkerThreads&&null!==WorkerThreads.parentPort){var parentPort=WorkerThreads.parentPort;worker.send=parentPort.postMessage.bind(parentPort),worker.on=parentPort.on.bind(parentPort)}else worker.on=process.on.bind(process),worker.send=process.send.bind(process)}worker.methods={},worker.methods.run=function run(fn,args){var f=eval(\"(\"+fn+\")\");return f.apply(f,args)},worker.methods.methods=function(){return Object.keys(worker.methods)},worker.on(\"message\",function(r){try{var e=worker.methods[r.method];if(!e)throw new Error('Unknown method \"'+r.method+'\"');var o=e.apply(e,r.params);isPromise(o)?o.then(function(e){worker.send({id:r.id,result:e,error:null})}).catch(function(e){worker.send({id:r.id,result:null,error:convertError(e)})}):worker.send({id:r.id,result:o,error:null})}catch(e){worker.send({id:r.id,result:null,error:convertError(e)})}}),worker.register=function(r){if(r)for(var e in r)r.hasOwnProperty(e)&&(worker.methods[e]=r[e]);worker.send(\"ready\")},exports.add=worker.register}]);";
+	module.exports = "!function(r){function e(n){if(o[n])return o[n].exports;var t=o[n]={exports:{},id:n,loaded:!1};return r[n].call(t.exports,t,t.exports,e),t.loaded=!0,t.exports}var o={};e.m=r,e.c=o,e.p=\"\",e(0)}([function(module,exports,__webpack_require__){function convertError(r){return Object.getOwnPropertyNames(r).reduce(function(e,o){return Object.defineProperty(e,o,{value:r[o],enumerable:!0})},{})}function isPromise(r){return r&&\"function\"==typeof r.then&&\"function\"==typeof r.catch}var worker={};if(\"undefined\"!=typeof self&&\"function\"==typeof postMessage&&\"function\"==typeof addEventListener)worker.on=function(r,e){addEventListener(r,function(r){e(r.data)})},worker.send=function(r){postMessage(r)};else{if(\"undefined\"==typeof process)throw new Error(\"Script must be executed as a worker\");var WorkerThreads;try{WorkerThreads=__webpack_require__(!function(){var r=new Error('Cannot find module \"worker_threads\"');throw r.code=\"MODULE_NOT_FOUND\",r}())}catch(r){if(\"object\"!=typeof r||null===r||\"MODULE_NOT_FOUND\"!=r.code)throw r}if(WorkerThreads&&null!==WorkerThreads.parentPort){var parentPort=WorkerThreads.parentPort;worker.send=parentPort.postMessage.bind(parentPort),worker.on=parentPort.on.bind(parentPort)}else worker.on=process.on.bind(process),worker.send=process.send.bind(process)}worker.methods={},worker.methods.run=function run(fn,args){var f=eval(\"(\"+fn+\")\");return f.apply(f,args)},worker.methods.methods=function(){return Object.keys(worker.methods)},worker.on(\"message\",function(r){try{var e=worker.methods[r.method];if(!e)throw new Error('Unknown method \"'+r.method+'\"');var o=e.apply(e,(r.params||[]).concat(function(e){worker.send({id:r.id,msg:e})}));isPromise(o)?o.then(function(e){worker.send({id:r.id,result:e,error:null})}).catch(function(e){worker.send({id:r.id,result:null,error:convertError(e)})}):worker.send({id:r.id,result:o,error:null})}catch(e){worker.send({id:r.id,result:null,error:convertError(e)})}}),worker.register=function(r){if(r)for(var e in r)r.hasOwnProperty(e)&&(worker.methods[e]=r[e]);worker.send(\"ready\")},exports.add=worker.register}]);";
 
 
 /***/ }),
@@ -1426,7 +1451,7 @@ return /******/ (function(modules) { // webpackBootstrap
 
 	  var WorkerThreads;
 	  try {
-	    WorkerThreads = __webpack_require__(11);
+	    WorkerThreads = __webpack_require__(!(function webpackMissingModule() { var e = new Error("Cannot find module \"worker_threads\""); e.code = 'MODULE_NOT_FOUND'; throw e; }()));
 	  } catch(error) {
 	    if (typeof error === 'object' && error !== null && error.code == 'MODULE_NOT_FOUND') {
 	      // no worker_threads, fallback to sub-process based workers
@@ -1494,10 +1519,10 @@ return /******/ (function(modules) { // webpackBootstrap
 	worker.on('message', function (request) {
 	  try {
 	    var method = worker.methods[request.method];
-
+	    
 	    if (method) {
 	      // execute the function
-	      var result = method.apply(method, request.params);
+	      var result = method.apply(method, (request.params || []).concat(function (msg) { worker.send({ id: request.id, msg: msg }) }))
 
 	      if (isPromise(result)) {
 	        // promise returned, resolve this and then return
@@ -1564,12 +1589,6 @@ return /******/ (function(modules) { // webpackBootstrap
 
 /***/ }),
 /* 11 */
-/***/ (function(module, exports) {
-
-	module.exports = require("worker_threads");
-
-/***/ }),
-/* 12 */
 /***/ (function(module, exports) {
 
 	module.exports = require("child_process");
